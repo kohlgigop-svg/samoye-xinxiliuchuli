@@ -8,10 +8,13 @@ create table if not exists public.table_datasets (
   sheet_names jsonb not null default '[]'::jsonb,
   sheets_json jsonb not null default '[]'::jsonb,
   storage_path text,
+  parsed_json_path text,
   created_at timestamptz not null default now()
 );
 
+alter table public.table_datasets add column if not exists parsed_json_path text;
 alter table public.table_datasets enable row level security;
+
 
 drop policy if exists "table_datasets_select_public" on public.table_datasets;
 create policy "table_datasets_select_public"

@@ -3,7 +3,7 @@ const LOCAL_DB_NAME = 'table-matcher-db';
 const LOCAL_STORE_NAME = 'datasets';
 const PREVIEW_LIMIT = 8;
 const RESULT_PREVIEW_LIMIT = 20;
-
+const STORAGE_BUCKET = 'table-files';
 
 const state = {
   client: null,
@@ -143,6 +143,35 @@ async function writeLocalDataset(dataset) {
   });
 }
 
+function buildSearchIndex(rows) {
+  const corpus = [];
+  for (const row of rows || []) {
+    const normalizedCells = Object.values(row || {}).map((cell) => normalize(cell)).filter(Boolean);
+    if (normalizedCells.length === 0) {
+      continue;
+    }
+    corpus.push(...normalizedCells, normalizedCells.join(''));
+  }
+  return corpus;
+}
+
+function hydrateSheets(sheets) {
+  return (Array.isArray(sheets) ? sheets : []).map((sheet) => {
+    const rows = Array.isArray(sheet.rows) ? sheet.rows : [];
+    const headers = Array.isArray(sheet.headers) && sheet.headers.length
+      ? sheet.headers
+      : Object.keys(rows[0] || {});
+    return {
+      name: sheet.name || 'Sheet1',
+      headers,
+      rows,
+      rowCount: Number(sheet.rowCount ?? rows.length),
+      searchIndex: Array.isArray(sheet.searchIndex) && sheet.searchIndex.length
+        ? sheet.searchIndex
+        : buildSearchIndex(rows),
+    };
+  });
+}
 
 function getSelectedDataset() {
   return state.datasets.find((item) => item.id === state.selectedDatasetId) || null;
@@ -167,7 +196,13 @@ function renderDatasetOptions() {
   el.datasetSelect.value = state.selectedDatasetId;
 }
 
-function renderSheetOptions(dataset) {
+function renderSheetOptions(dataset, loading = false) {
+  if (loading) {
+    el.sheetSelect.disabled = true;
+    el.sheetSelect.innerHTML = '<option value="">正在读取工作表...</option>';
+    return;
+  }
+
   if (!dataset || !Array.isArray(dataset.sheets) || dataset.sheets.length === 0) {
     el.sheetSelect.disabled = true;
     el.sheetSelect.innerHTML = '<option value="">请先选择表格文件</option>';
@@ -203,22 +238,6 @@ function renderPreview(sheet) {
   el.previewBody.innerHTML = rowsHtml.join('');
 }
 
-function updateDatasetPanel() {
-  const dataset = getSelectedDataset();
-  renderSheetOptions(dataset);
-
-  if (!dataset) {
-    setStatus(el.datasetInfo, '当前没有可用数据表。', 'muted');
-    renderPreview(null);
-    return;
-  }
-
-  const sheet = getSelectedSheet(dataset);
-  const message = `已选择 ${dataset.fileName}，包含 ${dataset.sheetNames.length} 个工作表，总计 ${dataset.rowCount} 行数据。当前工作表：${sheet?.name || '无'}`;
-  setStatus(el.datasetInfo, message, 'success');
-  renderPreview(sheet);
-}
-
 function buildRowsFromMatrix(matrix) {
   const cleaned = (matrix || [])
     .map((row) => (Array.isArray(row) ? row.map((cell) => String(cell ?? '').trim()) : []))
@@ -237,18 +256,6 @@ function buildRowsFromMatrix(matrix) {
   return { headers, rows };
 }
 
-function buildSearchIndex(rows) {
-  const corpus = [];
-  for (const row of rows) {
-    const normalizedCells = Object.values(row).map((cell) => normalize(cell)).filter(Boolean);
-    if (normalizedCells.length === 0) {
-      continue;
-    }
-    corpus.push(...normalizedCells, normalizedCells.join(''));
-  }
-  return corpus;
-}
-
 async function hashFile(file) {
   const buffer = await file.arrayBuffer();
   const digest = await crypto.subtle.digest('SHA-256', buffer);
@@ -263,7 +270,7 @@ async function parseTableFile(file) {
     ? XLSX.read(await file.text(), { type: 'string' })
     : XLSX.read(await file.arrayBuffer(), { type: 'array' });
 
-  const sheets = workbook.SheetNames.map((sheetName) => {
+  const sheets = hydrateSheets(workbook.SheetNames.map((sheetName) => {
     const matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
       header: 1,
       raw: false,
@@ -276,9 +283,8 @@ async function parseTableFile(file) {
       headers,
       rows,
       rowCount: rows.length,
-      searchIndex: buildSearchIndex(rows),
     };
-  });
+  }));
 
   return {
     id: crypto.randomUUID(),
@@ -291,17 +297,76 @@ async function parseTableFile(file) {
   };
 }
 
+function createRemoteDatasetPayload(dataset) {
+  return JSON.stringify({
+    fileName: dataset.fileName,
+    fileHash: dataset.fileHash,
+    rowCount: dataset.rowCount,
+    sheetNames: dataset.sheetNames,
+    sheets: dataset.sheets.map((sheet) => ({
+      name: sheet.name,
+      headers: sheet.headers,
+      rows: sheet.rows,
+      rowCount: sheet.rowCount,
+    })),
+    createdAt: dataset.createdAt,
+  });
+}
+
 function normalizeDataset(record) {
+  const rawSheets = record.sheets_json || record.sheets || [];
   return {
     id: record.id,
     fileName: record.file_name || record.fileName,
     fileHash: record.file_hash || record.fileHash,
     rowCount: Number(record.row_count || record.rowCount || 0),
     sheetNames: record.sheet_names || record.sheetNames || [],
-    sheets: record.sheets_json || record.sheets || [],
+    sheets: hydrateSheets(rawSheets),
     createdAt: record.created_at || record.createdAt || new Date().toISOString(),
     storagePath: record.storage_path || record.storagePath || '',
+    parsedJsonPath: record.parsed_json_path || record.parsedJsonPath || '',
   };
+}
+
+async function loadRemoteDatasetContent(dataset) {
+  if (!state.client) {
+    return dataset;
+  }
+  if (Array.isArray(dataset.sheets) && dataset.sheets.length > 0) {
+    return dataset;
+  }
+  if (!dataset.parsedJsonPath) {
+    throw new Error('当前数据表缺少解析结果，请重新上传该文件。');
+  }
+
+  const { data, error } = await state.client.storage.from(STORAGE_BUCKET).download(dataset.parsedJsonPath);
+  if (error) {
+    throw error;
+  }
+
+  const parsed = JSON.parse(await data.text());
+  return {
+    ...dataset,
+    rowCount: Number(parsed.rowCount ?? dataset.rowCount ?? 0),
+    sheetNames: parsed.sheetNames || dataset.sheetNames || [],
+    sheets: hydrateSheets(parsed.sheets || []),
+  };
+}
+
+async function ensureDatasetLoaded(datasetId = state.selectedDatasetId) {
+  const index = state.datasets.findIndex((item) => item.id === datasetId);
+  if (index === -1) {
+    return null;
+  }
+
+  const current = state.datasets[index];
+  if (!state.client || (Array.isArray(current.sheets) && current.sheets.length > 0)) {
+    return current;
+  }
+
+  const loaded = await loadRemoteDatasetContent(current);
+  state.datasets[index] = loaded;
+  return loaded;
 }
 
 async function persistDataset(file, dataset) {
@@ -310,15 +375,27 @@ async function persistDataset(file, dataset) {
     return dataset;
   }
 
-  const storagePath = `${dataset.fileHash}/${encodeURIComponent(file.name)}`;
+  const storage = state.client.storage.from(STORAGE_BUCKET);
+  const rawFilePath = `raw/${dataset.fileHash}/${encodeURIComponent(file.name)}`;
+  const parsedJsonPath = `parsed/${dataset.fileHash}.json`;
 
-  const storage = state.client.storage.from('table-files');
-  const uploadResult = await storage.upload(storagePath, file, {
+  const uploadRawResult = await storage.upload(rawFilePath, file, {
     upsert: true,
     contentType: file.type || 'application/octet-stream',
   });
-  if (uploadResult.error) {
-    throw uploadResult.error;
+  if (uploadRawResult.error) {
+    throw uploadRawResult.error;
+  }
+
+  const parsedBlob = new Blob([createRemoteDatasetPayload(dataset)], {
+    type: 'application/json;charset=utf-8',
+  });
+  const uploadParsedResult = await storage.upload(parsedJsonPath, parsedBlob, {
+    upsert: true,
+    contentType: 'application/json',
+  });
+  if (uploadParsedResult.error) {
+    throw uploadParsedResult.error;
   }
 
   const payload = {
@@ -327,21 +404,24 @@ async function persistDataset(file, dataset) {
     file_hash: dataset.fileHash,
     row_count: dataset.rowCount,
     sheet_names: dataset.sheetNames,
-    sheets_json: dataset.sheets,
-    storage_path: storagePath,
+    storage_path: rawFilePath,
+    parsed_json_path: parsedJsonPath,
   };
 
   const { data, error } = await state.client
     .from('table_datasets')
     .upsert(payload, { onConflict: 'file_hash' })
-    .select()
+    .select('id, file_name, file_hash, row_count, sheet_names, storage_path, parsed_json_path, created_at')
     .single();
 
   if (error) {
     throw error;
   }
 
-  return normalizeDataset(data);
+  return {
+    ...normalizeDataset(data),
+    sheets: dataset.sheets,
+  };
 }
 
 async function loadDatasets() {
@@ -349,24 +429,55 @@ async function loadDatasets() {
     if (state.client) {
       const { data, error } = await state.client
         .from('table_datasets')
-        .select('id, file_name, file_hash, row_count, sheet_names, sheets_json, storage_path, created_at')
+        .select('id, file_name, file_hash, row_count, sheet_names, storage_path, parsed_json_path, created_at')
         .order('created_at', { ascending: false });
+
       if (error) {
         throw error;
       }
       state.datasets = (data || []).map(normalizeDataset);
     } else {
-      state.datasets = await readLocalDatasets();
+      state.datasets = (await readLocalDatasets()).map(normalizeDataset);
     }
-
 
     if (!state.datasets.some((item) => item.id === state.selectedDatasetId)) {
       state.selectedDatasetId = state.datasets[0]?.id || '';
+      state.selectedSheetName = '';
     }
+
     renderDatasetOptions();
-    updateDatasetPanel();
+    await updateDatasetPanel();
   } catch (error) {
     setStatus(el.datasetInfo, `加载数据表失败：${error.message || '未知错误'}`, 'error');
+  }
+}
+
+async function updateDatasetPanel() {
+  try {
+    let dataset = getSelectedDataset();
+    if (!dataset) {
+      renderSheetOptions(null);
+      setStatus(el.datasetInfo, '当前没有可用数据表。', 'muted');
+      renderPreview(null);
+      return;
+    }
+
+    if (state.client && (!Array.isArray(dataset.sheets) || dataset.sheets.length === 0) && dataset.parsedJsonPath) {
+      renderSheetOptions(null, true);
+      renderPreview(null);
+      setStatus(el.datasetInfo, `正在从后端读取 ${dataset.fileName} 的解析结果...`, 'info');
+      dataset = await ensureDatasetLoaded(dataset.id);
+    }
+
+    renderSheetOptions(dataset);
+    const sheet = getSelectedSheet(dataset);
+    const message = `已选择 ${dataset.fileName}，包含 ${dataset.sheetNames.length} 个工作表，总计 ${dataset.rowCount} 行数据。当前工作表：${sheet?.name || '无'}`;
+    setStatus(el.datasetInfo, message, 'success');
+    renderPreview(sheet);
+  } catch (error) {
+    renderSheetOptions(null);
+    renderPreview(null);
+    setStatus(el.datasetInfo, `读取数据表失败：${error.message || '未知错误'}`, 'error');
   }
 }
 
@@ -393,7 +504,7 @@ async function handleTableUpload() {
     await loadDatasets();
     setStatus(
       el.tableUploadStatus,
-      `已完成 ${file.name} 入库，累计写入 ${storedDataset.rowCount} 行，支持通过文件名再次选择。`,
+      `已完成 ${file.name} 入库，累计写入 ${storedDataset.rowCount} 行。远程模式下原文件与解析结果都已保存到仓库。`,
       'success',
     );
   } catch (error) {
@@ -491,47 +602,56 @@ function renderSummary(results) {
     .join('');
 }
 
-function compareTasks() {
-  const dataset = getSelectedDataset();
-  const sheet = getSelectedSheet(dataset);
+async function compareTasks() {
+  try {
+    let dataset = getSelectedDataset();
+    if (!dataset) {
+      setStatus(el.datasetInfo, '请先选择一个可用的数据表。', 'warn');
+      return;
+    }
 
-  if (!dataset || !sheet) {
-    setStatus(el.datasetInfo, '请先选择一个可用的数据表。', 'warn');
-    return;
+    dataset = await ensureDatasetLoaded(dataset.id);
+    const sheet = getSelectedSheet(dataset);
+    if (!sheet) {
+      setStatus(el.datasetInfo, '当前工作表尚未完成读取，请稍后重试。', 'warn');
+      return;
+    }
+
+    if (!state.jsonlTasks.length) {
+      setStatus(el.jsonlStatus, '请先读取 JSONL 中的 task 字段。', 'warn');
+      return;
+    }
+
+    const corpus = Array.isArray(sheet.searchIndex) && sheet.searchIndex.length
+      ? sheet.searchIndex
+      : buildSearchIndex(sheet.rows || []);
+
+    const details = state.jsonlTasks.map((item) => ({
+      ...item,
+      matched: corpus.some((text) => item.normalized && text.includes(item.normalized)),
+    }));
+
+    const matchedCount = details.filter((item) => item.matched).length;
+    const total = details.length;
+    const ratio = total ? ((matchedCount / total) * 100).toFixed(2) : '0.00';
+    const results = {
+      fileName: dataset.fileName,
+      sheetName: sheet.name,
+      total,
+      matchedCount,
+      unmatchedCount: total - matchedCount,
+      ratio,
+      allMatched: matchedCount === total,
+      skippedJsonlLines: state.skippedJsonlLines,
+      details,
+    };
+
+    renderSummary(results);
+    renderResultLists(results);
+    el.rawResult.textContent = JSON.stringify(results, null, 2);
+  } catch (error) {
+    setStatus(el.datasetInfo, `匹配前读取数据失败：${error.message || '未知错误'}`, 'error');
   }
-
-  if (!state.jsonlTasks.length) {
-    setStatus(el.jsonlStatus, '请先读取 JSONL 中的 task 字段。', 'warn');
-    return;
-  }
-
-  const corpus = Array.isArray(sheet.searchIndex) && sheet.searchIndex.length
-    ? sheet.searchIndex
-    : buildSearchIndex(sheet.rows || []);
-
-  const details = state.jsonlTasks.map((item) => ({
-    ...item,
-    matched: corpus.some((text) => item.normalized && text.includes(item.normalized)),
-  }));
-
-  const matchedCount = details.filter((item) => item.matched).length;
-  const total = details.length;
-  const ratio = total ? ((matchedCount / total) * 100).toFixed(2) : '0.00';
-  const results = {
-    fileName: dataset.fileName,
-    sheetName: sheet.name,
-    total,
-    matchedCount,
-    unmatchedCount: total - matchedCount,
-    ratio,
-    allMatched: matchedCount === total,
-    skippedJsonlLines: state.skippedJsonlLines,
-    details,
-  };
-
-  renderSummary(results);
-  renderResultLists(results);
-  el.rawResult.textContent = JSON.stringify(results, null, 2);
 }
 
 function bindEvents() {

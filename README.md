@@ -18,16 +18,18 @@
 
 - 前端托管：GitHub Pages
 - 后端数据仓库：Supabase
-  - `storage` 保存原始表格文件
-  - `table_datasets` 保存解析后的工作表内容与文件元数据
+  - `storage` 保存原始表格文件和解析后的完整 JSON
+  - `table_datasets` 只保存文件元数据、工作表名称和解析结果路径，避免大表直接写库超时
+
 
 之所以这样设计，是因为 GitHub Pages 只能托管静态资源，不能直接承载自建后端接口。
 
 ## 1. 配置 Supabase
 
 1. 创建一个 Supabase 项目；
-2. 在 SQL Editor 中执行 `supabase/schema.sql`；
+2. 在 SQL Editor 中执行 `supabase/schema.sql`；如果你之前已经跑过旧版脚本，请重新执行一次，让 `table_datasets` 自动补齐 `parsed_json_path` 字段；
 3. 打开 `site/assets/config.js`，填入：
+
 
 ```js
 window.APP_CONFIG = {
@@ -46,14 +48,16 @@ window.APP_CONFIG = {
 ## 3. 部署到 GitHub Pages
 
 1. 将当前目录初始化为 Git 仓库并推送到 GitHub；
-2. 默认工作流会在推送到 `main` 分支后自动部署 `site/` 目录；
+2. 当前工作流会在推送到 `master` 分支后自动部署 `site/` 目录；如果你的默认分支不是 `master`，请同步修改 `.github/workflows/deploy.yml`；
 3. 在 GitHub 仓库的 `Settings -> Pages` 中确认使用 `GitHub Actions` 作为部署来源。
+
 
 ## 4. 使用方式
 
 1. 在“后端仓库配置”中填写 Supabase 信息并保存；
-2. 在“上传表格文件”中上传 `.xlsx` / `.xls` / `.csv`；
-3. 在“选择数据表”中按文件名选择目标表格，再切换工作表；
+2. 在“上传表格文件”中上传 `.xlsx` / `.xls` / `.csv`，原文件和解析结果会一起写入 Supabase Storage；
+3. 在“选择数据表”中按文件名选择目标表格，再切换工作表；首次读取远程数据时页面会自动从 Storage 拉取解析结果；
+
 4. 在“读取 JSONL”中上传 `.jsonl` 文件并提取 `task` 字段；
 5. 点击“开始匹配计算”，查看匹配总数、占比、未匹配条目和原始结果 JSON。
 
@@ -81,6 +85,4 @@ window.APP_CONFIG = {
 - 表格文件会被解析为多个工作表；
 - 每个工作表中的所有非空单元格都会参与匹配索引；
 - JSONL 中每一条 `task` 会做统一归一化处理（转小写、去空白）；
-- 只要某条 `task` 被发现包含于任一单元格文本或同一行拼接文本中，即记为匹配成功；
-- 匹配占比 = `matchedCount / taskCount * 100%`。
-
+- 只要某条 `task` 被发现包含于任一单元格文本或同一行拼接
