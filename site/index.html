@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>表格任务匹配分析台</title>
+    <meta
+      name="description"
+      content="上传表格文件到后端仓库，选择数据表并读取 JSONL 的 task 字段，完成匹配度分析。"
+    />
+    <link rel="stylesheet" href="./assets/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero card">
+        <div>
+          <p class="eyebrow">GitHub Pages + Supabase</p>
+          <h1>表格任务匹配分析台</h1>
+          <p class="hero-copy">
+            这个站点可直接部署到 GitHub Pages。前端负责上传、读取和分析；后端建议用 Supabase 充当数据仓库，存储原始表格文件和解析后的结构化内容。
+          </p>
+        </div>
+        <div class="hero-tips">
+          <span class="tag">支持 xlsx / xls / csv</span>
+          <span class="tag">支持 jsonl</span>
+          <span class="tag">未配置后端时可本地演示</span>
+        </div>
+      </header>
+
+      <main class="grid-layout">
+        <section class="card section-block">
+          <div class="section-title-row">
+            <div>
+              <p class="section-index">01</p>
+              <h2>后端仓库配置</h2>
+            </div>
+            <button id="saveConfigBtn" class="btn btn-primary" type="button">保存配置</button>
+          </div>
+          <p class="section-desc">
+            GitHub Pages 只能部署静态前端，因此这里通过 Supabase 承担“后端数据仓库”。如果暂时不填，页面会退化到浏览器本地模式，方便先验功能。
+          </p>
+          <div class="form-grid two-col">
+            <label class="field">
+              <span>Supabase URL</span>
+              <input id="supabaseUrl" type="url" placeholder="https://your-project.supabase.co" />
+            </label>
+            <label class="field">
+              <span>Supabase Anon Key</span>
+              <textarea id="supabaseAnonKey" rows="3" placeholder="粘贴 public anon key"></textarea>
+            </label>
+          </div>
+          <div id="backendStatus" class="status-box info">正在等待配置。</div>
+        </section>
+
+        <section class="card section-block">
+          <div class="section-title-row">
+            <div>
+              <p class="section-index">02</p>
+              <h2>上传表格文件</h2>
+            </div>
+            <button id="uploadTableBtn" class="btn btn-primary" type="button">上传并入库</button>
+          </div>
+          <p class="section-desc">
+            选择一个表格文件后，页面会先在前端解析，再把原文件和解析结果一起写入后端仓库；若未配置后端，则先保存到浏览器本地数据库做演示。
+          </p>
+
+          <label class="file-drop">
+            <input id="tableFileInput" type="file" accept=".xlsx,.xls,.csv" />
+            <span>点击选择或拖入表格文件</span>
+          </label>
+          <div id="tableUploadStatus" class="status-box muted">尚未选择文件。</div>
+        </section>
+
+        <section class="card section-block">
+          <div class="section-title-row">
+            <div>
+              <p class="section-index">03</p>
+              <h2>选择数据表</h2>
+            </div>
+            <button id="refreshDatasetsBtn" class="btn btn-secondary" type="button">刷新列表</button>
+          </div>
+          <div class="form-grid two-col compact-gap">
+            <label class="field">
+              <span>表格文件</span>
+              <select id="datasetSelect">
+                <option value="">请选择已上传的表格文件</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>工作表</span>
+              <select id="sheetSelect" disabled>
+                <option value="">请先选择表格文件</option>
+              </select>
+            </label>
+          </div>
+          <div id="datasetInfo" class="status-box muted">当前没有可用数据表。</div>
+          <div class="table-preview-wrap">
+            <table class="preview-table">
+              <thead id="previewHead"></thead>
+              <tbody id="previewBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card section-block">
+          <div class="section-title-row">
+            <div>
+              <p class="section-index">04</p>
+              <h2>读取 JSONL</h2>
+            </div>
+            <button id="parseJsonlBtn" class="btn btn-primary" type="button">读取 task 字段</button>
+          </div>
+          <p class="section-desc">
+            只提取每一行 JSON 中的 <code>task</code> 字段，忽略空行和没有该字段的数据。
+          </p>
+          <label class="file-drop">
+            <input id="jsonlFileInput" type="file" accept=".jsonl,.json" />
+            <span>点击选择 JSONL 文件</span>
+          </label>
+          <div id="jsonlStatus" class="status-box muted">尚未读取 JSONL。</div>
+        </section>
+
+        <section class="card section-block full-width">
+          <div class="section-title-row">
+            <div>
+              <p class="section-index">05</p>
+              <h2>匹配分析结果</h2>
+            </div>
+            <button id="compareBtn" class="btn btn-primary" type="button">开始匹配计算</button>
+          </div>
+          <div id="resultSummary" class="summary-grid empty-state">
+            请选择一个表格文件，并读取一个 JSONL 文件后再执行匹配。
+          </div>
+          <div class="result-columns">
+            <div>
+              <h3>已匹配 task</h3>
+              <ul id="matchedList" class="result-list"></ul>
+            </div>
+            <div>
+              <h3>未匹配 task</h3>
+              <ul id="unmatchedList" class="result-list"></ul>
+            </div>
+          </div>
+          <details class="raw-result">
+            <summary>查看原始结果 JSON</summary>
+            <pre id="rawResult">暂无结果。</pre>
+          </details>
+        </section>
+      </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script src="./assets/config.js"></script>
+    <script src="./assets/app.js"></script>
+  </body>
+</html>
