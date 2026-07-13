@@ -750,12 +750,26 @@ function buildRateRows(results) {
   }));
 }
 
-function buildRateCopyText(rows) {
-  return rows.map((row) => row.ratio).join('\n');
+function buildRateCopyPayload(rows) {
+  const ratios = rows.map((row) => row.ratio);
+  return {
+    text: ratios.join('\r\n'),
+    html: `<table><tbody>${ratios.map((ratio) => `<tr><td>${escapeHtml(ratio)}</td></tr>`).join('')}</tbody></table>`,
+  };
 }
 
-async function copyText(text) {
+async function copyText(text, html = '') {
+
   try {
+    if (html && navigator.clipboard?.write && window.ClipboardItem) {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/plain': new Blob([text], { type: 'text/plain' }),
+          'text/html': new Blob([html], { type: 'text/html' }),
+        }),
+      ]);
+      return true;
+    }
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
       return true;
@@ -779,6 +793,7 @@ async function copyText(text) {
     return false;
   }
 }
+
 
 function renderDataTable(headers, rows) {
   return `
@@ -1125,13 +1140,15 @@ function bindEvents() {
     if (!currentRateRows.length) {
       return;
     }
-    const copied = await copyText(buildRateCopyText(currentRateRows));
+    const payload = buildRateCopyPayload(currentRateRows);
+    const copied = await copyText(payload.text, payload.html);
     const originalText = el.copyRatesBtn.textContent;
-    el.copyRatesBtn.textContent = copied ? '已复制' : '复制失败';
+    el.copyRatesBtn.textContent = copied ? '已复制占比列' : '复制失败';
     setTimeout(() => {
       el.copyRatesBtn.textContent = originalText;
     }, 1500);
   });
+
 
   el.datasetSelect.addEventListener('change', (event) => {
     state.selectedDatasetId = event.target.value;

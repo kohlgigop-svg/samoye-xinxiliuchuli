@@ -148,7 +148,8 @@
               <h2>JSON / JSONL 字段分析</h2>
             </div>
             <div class="section-actions">
-              <button id="copyRatesBtn" class="btn btn-secondary" type="button" disabled>复制占比结果</button>
+              <button id="copyRatesBtn" class="btn btn-secondary" type="button" disabled>复制占比结果列</button>
+
               <button class="btn btn-tertiary section-toggle" type="button" data-section-toggle aria-expanded="true">收起</button>
             </div>
           </div>
@@ -161,7 +162,8 @@
                 <div class="subsection-head">
                   <div>
                     <h3>按文件排序的占比结果</h3>
-                    <p class="section-desc">计算公式为 <code>complete + call user</code> / 该文件总记录数 × 100%。</p>
+                    <p class="section-desc">计算公式为 <code>complete + call user</code> / 该文件总记录数 × 100%。点击上方按钮时，只会复制“占比结果”这一列，可直接粘贴到飞书多维表格。</p>
+
                   </div>
                 </div>
                 <div id="rateSummaryTable">
