@@ -17,8 +17,9 @@
           <p class="eyebrow">GitHub Pages + Supabase</p>
           <h1>表格任务匹配分析台</h1>
           <p class="hero-copy">
-            这个站点可直接部署到 GitHub Pages。前端负责上传、读取和分析；后端建议用 Supabase 充当数据仓库，存储原始表格文件和解析后的结构化内容。
+            这个站点可直接部署到 GitHub Pages。前端负责上传、读取和分析；后端建议用 Supabase 充当数据仓库，仅存储原始表格文件和轻量元数据，真正读取时再按需解析。
           </p>
+
         </div>
         <div class="hero-tips">
           <span class="tag">支持 xlsx / xls / csv</span>
@@ -61,8 +62,9 @@
             <button id="uploadTableBtn" class="btn btn-primary" type="button">上传并入库</button>
           </div>
           <p class="section-desc">
-            选择一个表格文件后，页面会先在前端解析，再把原文件和解析结果一起写入后端仓库；若未配置后端，则先保存到浏览器本地数据库做演示。
+            选择一个表格文件后，页面会先在前端解析，再把原文件和文件元数据写入后端仓库；若未配置后端，则先保存到浏览器本地数据库做演示。
           </p>
+
 
           <label class="file-drop">
             <input id="tableFileInput" type="file" accept=".xlsx,.xls,.csv" />

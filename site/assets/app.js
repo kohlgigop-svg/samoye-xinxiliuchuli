@@ -144,15 +144,16 @@ async function writeLocalDataset(dataset) {
 }
 
 function buildSearchIndex(rows) {
-  const corpus = [];
+  const corpus = new Set();
   for (const row of rows || []) {
     const normalizedCells = Object.values(row || {}).map((cell) => normalize(cell)).filter(Boolean);
     if (normalizedCells.length === 0) {
       continue;
     }
-    corpus.push(...normalizedCells, normalizedCells.join(''));
+    normalizedCells.forEach((text) => corpus.add(text));
+    corpus.add(normalizedCells.join(''));
   }
-  return corpus;
+  return Array.from(corpus);
 }
 
 function hydrateSheets(sheets) {
@@ -168,10 +169,11 @@ function hydrateSheets(sheets) {
       rowCount: Number(sheet.rowCount ?? rows.length),
       searchIndex: Array.isArray(sheet.searchIndex) && sheet.searchIndex.length
         ? sheet.searchIndex
-        : buildSearchIndex(rows),
+        : null,
     };
   });
 }
+
 
 function getSelectedDataset() {
   return state.datasets.find((item) => item.id === state.selectedDatasetId) || null;
@@ -264,13 +266,15 @@ async function hashFile(file) {
     .join('');
 }
 
-async function parseTableFile(file) {
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  const workbook = ext === 'csv'
-    ? XLSX.read(await file.text(), { type: 'string' })
-    : XLSX.read(await file.arrayBuffer(), { type: 'array' });
+async function readWorkbook(source, fileName) {
+  const ext = fileName.split('.').pop()?.toLowerCase();
+  return ext === 'csv'
+    ? XLSX.read(await source.text(), { type: 'string' })
+    : XLSX.read(await source.arrayBuffer(), { type: 'array' });
+}
 
-  const sheets = hydrateSheets(workbook.SheetNames.map((sheetName) => {
+function extractSheetsFromWorkbook(workbook) {
+  return hydrateSheets(workbook.SheetNames.map((sheetName) => {
     const matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
       header: 1,
       raw: false,
@@ -285,6 +289,11 @@ async function parseTableFile(file) {
       rowCount: rows.length,
     };
   }));
+}
+
+async function parseTableFile(file) {
+  const workbook = await readWorkbook(file, file.name);
+  const sheets = extractSheetsFromWorkbook(workbook);
 
   return {
     id: crypto.randomUUID(),
@@ -297,24 +306,19 @@ async function parseTableFile(file) {
   };
 }
 
-function createRemoteDatasetPayload(dataset) {
-  return JSON.stringify({
-    fileName: dataset.fileName,
-    fileHash: dataset.fileHash,
-    rowCount: dataset.rowCount,
-    sheetNames: dataset.sheetNames,
-    sheets: dataset.sheets.map((sheet) => ({
-      name: sheet.name,
-      headers: sheet.headers,
-      rows: sheet.rows,
-      rowCount: sheet.rowCount,
-    })),
-    createdAt: dataset.createdAt,
-  });
+async function parseStoredTableFile(blob, fileName) {
+  const workbook = await readWorkbook(blob, fileName);
+  const sheets = extractSheetsFromWorkbook(workbook);
+  return {
+    fileName,
+    rowCount: sheets.reduce((sum, sheet) => sum + sheet.rowCount, 0),
+    sheetNames: sheets.map((sheet) => sheet.name),
+    sheets,
+  };
 }
 
 function normalizeDataset(record) {
-  const rawSheets = record.sheets_json || record.sheets || [];
+  const rawSheets = record.sheets || [];
   return {
     id: record.id,
     fileName: record.file_name || record.fileName,
@@ -335,23 +339,40 @@ async function loadRemoteDatasetContent(dataset) {
   if (Array.isArray(dataset.sheets) && dataset.sheets.length > 0) {
     return dataset;
   }
-  if (!dataset.parsedJsonPath) {
-    throw new Error('当前数据表缺少解析结果，请重新上传该文件。');
+
+  if (dataset.storagePath) {
+    const { data, error } = await state.client.storage.from(STORAGE_BUCKET).download(dataset.storagePath);
+    if (error) {
+      throw error;
+    }
+
+    const parsed = await parseStoredTableFile(data, dataset.fileName);
+    return {
+      ...dataset,
+      rowCount: Number(parsed.rowCount ?? dataset.rowCount ?? 0),
+      sheetNames: parsed.sheetNames || dataset.sheetNames || [],
+      sheets: parsed.sheets,
+    };
   }
 
-  const { data, error } = await state.client.storage.from(STORAGE_BUCKET).download(dataset.parsedJsonPath);
-  if (error) {
-    throw error;
+  if (dataset.parsedJsonPath) {
+    const { data, error } = await state.client.storage.from(STORAGE_BUCKET).download(dataset.parsedJsonPath);
+    if (error) {
+      throw error;
+    }
+
+    const parsed = JSON.parse(await data.text());
+    return {
+      ...dataset,
+      rowCount: Number(parsed.rowCount ?? dataset.rowCount ?? 0),
+      sheetNames: parsed.sheetNames || dataset.sheetNames || [],
+      sheets: hydrateSheets(parsed.sheets || []),
+    };
   }
 
-  const parsed = JSON.parse(await data.text());
-  return {
-    ...dataset,
-    rowCount: Number(parsed.rowCount ?? dataset.rowCount ?? 0),
-    sheetNames: parsed.sheetNames || dataset.sheetNames || [],
-    sheets: hydrateSheets(parsed.sheets || []),
-  };
+  throw new Error('当前数据表缺少远程文件路径，请重新上传该文件。');
 }
+
 
 async function ensureDatasetLoaded(datasetId = state.selectedDatasetId) {
   const index = state.datasets.findIndex((item) => item.id === datasetId);
@@ -377,7 +398,6 @@ async function persistDataset(file, dataset) {
 
   const storage = state.client.storage.from(STORAGE_BUCKET);
   const rawFilePath = `raw/${dataset.fileHash}/${encodeURIComponent(file.name)}`;
-  const parsedJsonPath = `parsed/${dataset.fileHash}.json`;
 
   const uploadRawResult = await storage.upload(rawFilePath, file, {
     upsert: true,
@@ -387,17 +407,6 @@ async function persistDataset(file, dataset) {
     throw uploadRawResult.error;
   }
 
-  const parsedBlob = new Blob([createRemoteDatasetPayload(dataset)], {
-    type: 'application/json;charset=utf-8',
-  });
-  const uploadParsedResult = await storage.upload(parsedJsonPath, parsedBlob, {
-    upsert: true,
-    contentType: 'application/json',
-  });
-  if (uploadParsedResult.error) {
-    throw uploadParsedResult.error;
-  }
-
   const payload = {
     id: dataset.id,
     file_name: dataset.fileName,
@@ -405,7 +414,7 @@ async function persistDataset(file, dataset) {
     row_count: dataset.rowCount,
     sheet_names: dataset.sheetNames,
     storage_path: rawFilePath,
-    parsed_json_path: parsedJsonPath,
+    parsed_json_path: null,
   };
 
   const { data, error } = await state.client
@@ -462,10 +471,10 @@ async function updateDatasetPanel() {
       return;
     }
 
-    if (state.client && (!Array.isArray(dataset.sheets) || dataset.sheets.length === 0) && dataset.parsedJsonPath) {
+    if (state.client && (!Array.isArray(dataset.sheets) || dataset.sheets.length === 0) && (dataset.storagePath || dataset.parsedJsonPath)) {
       renderSheetOptions(null, true);
       renderPreview(null);
-      setStatus(el.datasetInfo, `正在从后端读取 ${dataset.fileName} 的解析结果...`, 'info');
+      setStatus(el.datasetInfo, `正在从后端下载 ${dataset.fileName} 并解析工作表...`, 'info');
       dataset = await ensureDatasetLoaded(dataset.id);
     }
 
@@ -504,7 +513,7 @@ async function handleTableUpload() {
     await loadDatasets();
     setStatus(
       el.tableUploadStatus,
-      `已完成 ${file.name} 入库，累计写入 ${storedDataset.rowCount} 行。远程模式下原文件与解析结果都已保存到仓库。`,
+      `已完成 ${file.name} 入库，累计写入 ${storedDataset.rowCount} 行。远程模式下仅保存原始表格文件，选择时再按需回读解析。`,
       'success',
     );
   } catch (error) {
@@ -513,6 +522,7 @@ async function handleTableUpload() {
     el.uploadTableBtn.disabled = false;
   }
 }
+
 
 async function parseJsonlFile() {
   const file = el.jsonlFileInput.files?.[0];
@@ -622,9 +632,11 @@ async function compareTasks() {
       return;
     }
 
-    const corpus = Array.isArray(sheet.searchIndex) && sheet.searchIndex.length
-      ? sheet.searchIndex
-      : buildSearchIndex(sheet.rows || []);
+    if (!Array.isArray(sheet.searchIndex) || !sheet.searchIndex.length) {
+      sheet.searchIndex = buildSearchIndex(sheet.rows || []);
+    }
+    const corpus = sheet.searchIndex;
+
 
     const details = state.jsonlTasks.map((item) => ({
       ...item,
