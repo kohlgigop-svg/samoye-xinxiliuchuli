@@ -635,29 +635,28 @@ function toRecordItems(value, fileName) {
 }
 
 function parseStructuredFile(text, fileName) {
-  const trimmed = text.trim();
+  const normalizedText = String(text || '').replace(/^\uFEFF/, '');
+  const trimmed = normalizedText.trim();
   if (!trimmed) {
     throw new Error('文件为空。');
   }
 
   const warnings = [];
-  const extIsJsonl = /\.jsonl$/i.test(fileName);
 
-  if (!extIsJsonl) {
-    try {
-      const value = JSON.parse(trimmed);
-      return {
-        items: toRecordItems(value, fileName),
-        format: 'JSON',
-        warnings,
-      };
-    } catch {
-      // 继续尝试按 JSONL 读取
-    }
+  try {
+    const value = JSON.parse(trimmed);
+    return {
+      items: toRecordItems(value, fileName),
+      format: 'JSON',
+      warnings,
+    };
+  } catch {
+    // 继续尝试按 JSONL 读取
   }
 
   const items = [];
-  const lines = text.split(/\r?\n/);
+  const lines = normalizedText.split(/\r?\n/);
+
 
   lines.forEach((line, index) => {
     const trimmedLine = line.trim();
@@ -990,9 +989,11 @@ async function parseJsonlFile() {
     renderJsonAnalysis(files, overallTasks, overallReasons, sortedResults, errors);
 
     if (!sortedResults.length) {
-      setStatus(el.jsonlStatus, '未能从所选文件中解析出可用记录，请检查文件格式。', 'error');
+      const firstError = errors[0] ? `首条原因：${errors[0]}` : '请检查文件格式。';
+      setStatus(el.jsonlStatus, `未能从所选文件中解析出可用记录。${firstError}`, 'error');
       return;
     }
+
 
     const fileSummary = files.length === 1 ? `文件 ${files[0].name}` : `${files.length} 个文件`;
     setStatus(
