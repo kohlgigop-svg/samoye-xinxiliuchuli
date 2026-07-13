@@ -56,7 +56,32 @@ function setStatus(target, message, tone = 'info') {
   target.textContent = message;
 }
 
+function setSectionCollapsed(section, collapsed) {
+  section.classList.toggle('is-collapsed', collapsed);
+  const toggleBtn = section.querySelector('[data-section-toggle]');
+  if (!toggleBtn) {
+    return;
+  }
+  toggleBtn.textContent = collapsed ? '展开' : '收起';
+  toggleBtn.setAttribute('aria-expanded', String(!collapsed));
+}
+
+function initializeSectionToggles() {
+  document.querySelectorAll('[data-section]').forEach((section) => {
+    const toggleBtn = section.querySelector('[data-section-toggle]');
+    if (!toggleBtn) {
+      return;
+    }
+    setSectionCollapsed(section, section.classList.contains('is-collapsed'));
+    toggleBtn.addEventListener('click', () => {
+      const nextCollapsed = !section.classList.contains('is-collapsed');
+      setSectionCollapsed(section, nextCollapsed);
+    });
+  });
+}
+
 function readStoredConfig() {
+
   try {
     return JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}');
   } catch {
@@ -525,47 +550,52 @@ async function handleTableUpload() {
 
 
 async function parseJsonlFile() {
-  const file = el.jsonlFileInput.files?.[0];
-  if (!file) {
-    setStatus(el.jsonlStatus, '请先选择一个 JSONL 文件。', 'warn');
+  const files = Array.from(el.jsonlFileInput.files || []);
+  if (!files.length) {
+    setStatus(el.jsonlStatus, '请先选择一个或多个 JSONL 文件。', 'warn');
     return;
   }
 
   el.parseJsonlBtn.disabled = true;
-  setStatus(el.jsonlStatus, `正在读取 ${file.name} ...`, 'info');
+  setStatus(el.jsonlStatus, `正在读取 ${files.length} 个 JSONL 文件 ...`, 'info');
 
   try {
-    const content = await file.text();
     const tasks = [];
     const skipped = [];
 
-    content.split(/\r?\n/).forEach((line, index) => {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        return;
-      }
-      try {
-        const item = JSON.parse(trimmed);
-        const task = typeof item.task === 'string' ? item.task.trim() : '';
-        if (task) {
-          tasks.push({
-            lineNumber: index + 1,
-            value: task,
-            normalized: normalize(task),
-          });
-        } else {
-          skipped.push(`第 ${index + 1} 行缺少 task 字段`);
+    for (const file of files) {
+      const content = await file.text();
+      content.split(/\r?\n/).forEach((line, index) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return;
         }
-      } catch {
-        skipped.push(`第 ${index + 1} 行不是合法 JSON`);
-      }
-    });
+        try {
+          const item = JSON.parse(trimmed);
+          const task = typeof item.task === 'string' ? item.task.trim() : '';
+          if (task) {
+            tasks.push({
+              sourceFile: file.name,
+              lineNumber: index + 1,
+              lineLabel: `${file.name} 第 ${index + 1} 行`,
+              value: task,
+              normalized: normalize(task),
+            });
+          } else {
+            skipped.push(`${file.name} 第 ${index + 1} 行缺少 task 字段`);
+          }
+        } catch {
+          skipped.push(`${file.name} 第 ${index + 1} 行不是合法 JSON`);
+        }
+      });
+    }
 
     state.jsonlTasks = tasks;
     state.skippedJsonlLines = skipped;
+    const fileSummary = files.length === 1 ? `文件 ${files[0].name}` : `${files.length} 个文件`;
     setStatus(
       el.jsonlStatus,
-      `已读取 ${tasks.length} 条 task 数据${skipped.length ? `，另外跳过 ${skipped.length} 行异常记录。` : '。'}`,
+      `已从${fileSummary}中读取 ${tasks.length} 条 task 数据${skipped.length ? `，另外跳过 ${skipped.length} 行异常记录。` : '。'}`,
       skipped.length ? 'warn' : 'success',
     );
   } catch (error) {
@@ -575,22 +605,24 @@ async function parseJsonlFile() {
   }
 }
 
+
 function renderResultLists(results) {
   const matchedPreview = results.details.filter((item) => item.matched).slice(0, RESULT_PREVIEW_LIMIT);
   const unmatchedPreview = results.details.filter((item) => !item.matched).slice(0, RESULT_PREVIEW_LIMIT);
 
   el.matchedList.innerHTML = matchedPreview.length
     ? matchedPreview
-        .map((item) => `<li class="matched">第 ${item.lineNumber} 行：${escapeHtml(item.value)}</li>`)
+        .map((item) => `<li class="matched">${escapeHtml(item.lineLabel || `第 ${item.lineNumber} 行`)}：${escapeHtml(item.value)}</li>`)
         .join('')
     : '<li class="matched">没有匹配成功的 task。</li>';
 
   el.unmatchedList.innerHTML = unmatchedPreview.length
     ? unmatchedPreview
-        .map((item) => `<li class="unmatched">第 ${item.lineNumber} 行：${escapeHtml(item.value)}</li>`)
+        .map((item) => `<li class="unmatched">${escapeHtml(item.lineLabel || `第 ${item.lineNumber} 行`)}：${escapeHtml(item.value)}</li>`)
         .join('')
     : '<li class="matched">全部 task 均已匹配。</li>';
 }
+
 
 function renderSummary(results) {
   const summaryItems = [
@@ -690,10 +722,20 @@ function bindEvents() {
   });
 
   el.jsonlFileInput.addEventListener('change', () => {
-    const file = el.jsonlFileInput.files?.[0];
-    setStatus(el.jsonlStatus, file ? `已选择文件：${file.name}` : '尚未读取 JSONL。', file ? 'info' : 'muted');
+    const files = Array.from(el.jsonlFileInput.files || []);
+    if (!files.length) {
+      setStatus(el.jsonlStatus, '尚未读取 JSONL。', 'muted');
+      return;
+    }
+    const previewNames = files.slice(0, 3).map((file) => file.name).join('、');
+    const suffix = files.length > 3 ? ' 等' : '';
+    const label = files.length === 1 ? `已选择文件：${files[0].name}` : `已选择 ${files.length} 个文件：${previewNames}${suffix}`;
+    setStatus(el.jsonlStatus, label, 'info');
   });
+
+  initializeSectionToggles();
 }
+
 
 async function bootstrap() {
   initializeClient();

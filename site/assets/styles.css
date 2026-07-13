@@ -115,9 +115,26 @@ pre {
   gap: 16px;
 }
 
+.section-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.section-body {
+  margin-top: 16px;
+}
+
+.section-block.is-collapsed .section-body {
+  display: none;
+}
+
 .full-width {
   grid-column: 1 / -1;
 }
+
 
 .btn {
   border: 0;
@@ -147,7 +164,14 @@ pre {
   color: var(--primary-dark);
 }
 
+.btn-tertiary {
+  background: #fff;
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
 .form-grid {
+
   display: grid;
   gap: 16px;
 }
@@ -370,7 +394,12 @@ pre {
     flex-direction: column;
   }
 
+  .section-actions {
+    justify-content: flex-start;
+  }
+
   .hero-tips {
+
     justify-content: flex-start;
     min-width: auto;
   }
