@@ -4,6 +4,8 @@ const LOCAL_STORE_NAME = 'datasets';
 const PREVIEW_LIMIT = 8;
 const RESULT_PREVIEW_LIMIT = 20;
 const STORAGE_BUCKET = 'table-files';
+const fileNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+let currentRateRows = [];
 
 const state = {
   client: null,
@@ -36,7 +38,15 @@ const el = {
   matchedList: document.querySelector('#matchedList'),
   unmatchedList: document.querySelector('#unmatchedList'),
   rawResult: document.querySelector('#rawResult'),
+  analysisSummary: document.querySelector('#analysisSummary'),
+  rateSummaryTable: document.querySelector('#rateSummaryTable'),
+  copyRatesBtn: document.querySelector('#copyRatesBtn'),
+  overallTaskDuplicates: document.querySelector('#overallTaskDuplicates'),
+  overallStepReasons: document.querySelector('#overallStepReasons'),
+  fileCards: document.querySelector('#fileCards'),
+  errorList: document.querySelector('#errorList'),
 };
+
 
 function normalize(value) {
   return String(value ?? '').toLowerCase().replace(/\s+/g, '');
@@ -51,10 +61,75 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function normalizeKey(key) {
+  return String(key ?? '').toLowerCase().replace(/[\s_-]/g, '');
+}
+
+function isTaskKey(key) {
+  return normalizeKey(key) === 'task';
+}
+
+function isReasonKey(key) {
+  return ['stepreason', 'stopreason'].includes(normalizeKey(key));
+}
+
+function safeText(value) {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+}
+
+function walk(value, visit) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => walk(item, visit));
+    return;
+  }
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    visit(key, child);
+    walk(child, visit);
+  }
+}
+
+function normalizeReasonValue(value) {
+  return String(value).trim().toLowerCase().replace(/[\s_-]/g, '');
+}
+
+function isTargetReasonValue(value) {
+  return ['complete', 'calluser'].includes(normalizeReasonValue(value));
+}
+
+function formatPercent(value) {
+  return `${Number(value || 0).toFixed(2)}%`;
+}
+
+function stripExtension(fileName) {
+  return String(fileName).replace(/\.[^.]+$/, '');
+}
+
+function sortResultsByFileName(results) {
+  return [...results].sort((a, b) => fileNameCollator.compare(stripExtension(a.fileName), stripExtension(b.fileName)));
+}
+
+function getGroupedEntries(values) {
+  const map = new Map();
+  for (const value of values) {
+    map.set(value, (map.get(value) || 0) + 1);
+  }
+  return Array.from(map.entries())
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value, 'zh-CN'));
+}
+
+function getDuplicateEntries(values) {
+  return getGroupedEntries(values).filter((item) => item.count > 1);
+}
+
 function setStatus(target, message, tone = 'info') {
   target.className = `status-box ${tone}`;
   target.textContent = message;
 }
+
 
 function setSectionCollapsed(section, collapsed) {
   section.classList.toggle('is-collapsed', collapsed);
@@ -549,61 +624,390 @@ async function handleTableUpload() {
 }
 
 
+function toRecordItems(value, fileName) {
+  const records = Array.isArray(value) ? value : [value];
+  return records.map((record, index) => ({
+    record,
+    lineNumber: null,
+    recordIndex: index + 1,
+    lineLabel: `${fileName} 第 ${index + 1} 条记录`,
+  }));
+}
+
+function parseStructuredFile(text, fileName) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    throw new Error('文件为空。');
+  }
+
+  const warnings = [];
+  const extIsJsonl = /\.jsonl$/i.test(fileName);
+
+  if (!extIsJsonl) {
+    try {
+      const value = JSON.parse(trimmed);
+      return {
+        items: toRecordItems(value, fileName),
+        format: 'JSON',
+        warnings,
+      };
+    } catch {
+      // 继续尝试按 JSONL 读取
+    }
+  }
+
+  const items = [];
+  const lines = text.split(/\r?\n/);
+
+  lines.forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) {
+      return;
+    }
+    try {
+      items.push({
+        record: JSON.parse(trimmedLine),
+        lineNumber: index + 1,
+        recordIndex: items.length + 1,
+        lineLabel: `${fileName} 第 ${index + 1} 行`,
+      });
+    } catch {
+      warnings.push(`第 ${index + 1} 行不是合法 JSON。`);
+    }
+  });
+
+  if (!items.length) {
+    throw new Error('无法识别为合法 JSON 或 JSONL。');
+  }
+
+  if (warnings.length) {
+    warnings.unshift(`JSONL 中有 ${warnings.length} 行解析失败，已跳过。`);
+  }
+
+  return {
+    items,
+    format: 'JSONL',
+    warnings,
+  };
+}
+
+function analyzeJsonItems(items, fileName) {
+  const tasks = [];
+  const taskEntries = [];
+  const reasons = [];
+  const matchedKeys = new Set();
+  let completeOrCallUserCount = 0;
+
+  for (const item of items) {
+    let recordMatched = false;
+    walk(item.record, (key, value) => {
+      if (isTaskKey(key) && safeText(value)) {
+        const task = String(value).trim();
+        tasks.push(task);
+        taskEntries.push({
+          sourceFile: fileName,
+          lineNumber: item.lineNumber || item.recordIndex,
+          lineLabel: item.lineLabel,
+          value: task,
+          normalized: normalize(task),
+        });
+        matchedKeys.add(key);
+      }
+      if (isReasonKey(key) && safeText(value)) {
+        const reasonText = String(value).trim();
+        reasons.push(reasonText);
+        matchedKeys.add(key);
+        if (isTargetReasonValue(reasonText)) {
+          recordMatched = true;
+        }
+      }
+    });
+    if (recordMatched) {
+      completeOrCallUserCount += 1;
+    }
+  }
+
+  return {
+    fileName,
+    recordCount: items.length,
+    tasks,
+    taskEntries,
+    reasons,
+    duplicateTasks: getDuplicateEntries(tasks),
+    reasonGroups: getGroupedEntries(reasons),
+    completeOrCallUserCount,
+    completeOrCallUserRatio: items.length ? (completeOrCallUserCount / items.length) * 100 : 0,
+    matchedKeys: Array.from(matchedKeys).sort(),
+  };
+}
+
+function buildRateRows(results) {
+  return results.map((result, index) => ({
+    order: index + 1,
+    fileName: result.fileName,
+    ratio: formatPercent(result.completeOrCallUserRatio),
+    matched: result.completeOrCallUserCount,
+    total: result.recordCount,
+  }));
+}
+
+function buildRateCopyText(rows) {
+  return rows.map((row) => row.ratio).join('\n');
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fallback below
+  }
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    return copied;
+  } catch {
+    return false;
+  }
+}
+
+function renderDataTable(headers, rows) {
+  return `
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell))}</td>`).join('')}</tr>`).join('')}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderEmptyPanel(text) {
+  return `<div class="empty-panel">${escapeHtml(text)}</div>`;
+}
+
+function renderSummaryCards(items) {
+  return items
+    .map(
+      (item) => `
+        <article class="summary-card">
+          <span>${escapeHtml(item.label)}</span>
+          <strong>${escapeHtml(item.value)}</strong>
+        </article>
+      `,
+    )
+    .join('');
+}
+
+function renderRateSummary(results) {
+  currentRateRows = buildRateRows(results);
+  el.copyRatesBtn.disabled = !currentRateRows.length;
+  el.rateSummaryTable.innerHTML = currentRateRows.length
+    ? renderDataTable(
+        ['排序', '文件名', '占比结果', '命中数 (complete + call user)', '总记录数'],
+        currentRateRows.map((row) => [row.order, row.fileName, row.ratio, row.matched, row.total]),
+      )
+    : renderEmptyPanel('暂无可复制的占比结果。');
+}
+
+function renderAnalysisSummary(files, tasks, reasons, results) {
+  const duplicateTasks = getDuplicateEntries(tasks);
+  const reasonGroups = getGroupedEntries(reasons);
+  const totalRecords = results.reduce((sum, item) => sum + item.recordCount, 0);
+  const matchedRecords = results.reduce((sum, item) => sum + item.completeOrCallUserCount, 0);
+  const overallRatio = totalRecords ? formatPercent((matchedRecords / totalRecords) * 100) : '0.00%';
+
+  el.analysisSummary.className = 'summary-grid';
+  el.analysisSummary.innerHTML = renderSummaryCards([
+    { label: '已选择文件', value: String(files.length) },
+    { label: '成功解析文件', value: String(results.length) },
+    { label: '记录总数', value: String(totalRecords) },
+    { label: '提取到的 Task', value: String(tasks.length) },
+    { label: '重复 Task 组数', value: String(duplicateTasks.length) },
+    { label: 'stop_reason 不同值', value: String(reasonGroups.length) },
+    { label: 'complete / call user 占比', value: overallRatio },
+  ]);
+}
+
+function renderAnalysisFiles(results) {
+  el.fileCards.innerHTML = results.length
+    ? results
+        .map((result) => {
+          const duplicateBadge = result.duplicateTasks.length
+            ? '<span class="analysis-badge danger">存在重复 Task</span>'
+            : '<span class="analysis-badge ok">Task 无重复</span>';
+          const keysText = result.matchedKeys.length ? result.matchedKeys.join('、') : '未匹配到字段';
+          return `
+            <article class="analysis-card">
+              <div class="analysis-card-head">
+                <div>
+                  <div class="analysis-card-title">${escapeHtml(result.fileName)}</div>
+                  <div class="analysis-meta">格式：${escapeHtml(result.detectedFormat)} ｜ 文件大小：${escapeHtml(result.fileSize)} ｜ 总记录数：${result.recordCount}<br>命中的字段名：${escapeHtml(keysText)}</div>
+                </div>
+                ${duplicateBadge}
+              </div>
+              <div class="analysis-mini-grid">
+                <div class="analysis-mini"><div class="k">Task 数量</div><div class="v">${result.tasks.length}</div></div>
+                <div class="analysis-mini"><div class="k">重复 Task 组数</div><div class="v">${result.duplicateTasks.length}</div></div>
+                <div class="analysis-mini"><div class="k">stop_reason 数量</div><div class="v">${result.reasons.length}</div></div>
+                <div class="analysis-mini"><div class="k">字段占比</div><div class="v">${formatPercent(result.completeOrCallUserRatio)}</div></div>
+              </div>
+              <details ${result.duplicateTasks.length ? 'open' : ''}>
+                <summary>该文件的重复 Task</summary>
+                <div class="details-body">
+                  ${result.duplicateTasks.length
+                    ? renderDataTable(['重复次数', 'Task'], result.duplicateTasks.map((item) => [item.count, item.value]))
+                    : renderEmptyPanel('未发现重复的 Task。')}
+                </div>
+              </details>
+              <details>
+                <summary>该文件的 stop_reason 分布</summary>
+                <div class="details-body">
+                  <div class="formula-card">
+                    <div class="label">自动计算结果</div>
+                    <div class="value">${formatPercent(result.completeOrCallUserRatio)}</div>
+                    <div class="desc">(${result.completeOrCallUserCount} / ${result.recordCount}) × 100% ，即 <code>complete + call user</code> / 该文件总记录数 × 100%</div>
+                  </div>
+                  ${result.reasonGroups.length
+                    ? renderDataTable(['出现次数', 'stop_reason'], result.reasonGroups.map((item) => [item.count, item.value]))
+                    : renderEmptyPanel('未发现 stop_reason / StepReason 字段。')}
+                </div>
+              </details>
+            </article>
+          `;
+        })
+        .join('')
+    : renderEmptyPanel('暂无逐文件分析结果。');
+}
+
+function renderAnalysisErrors(errors) {
+  el.errorList.innerHTML = errors.length
+    ? errors.map((message) => `<div class="error-item">${escapeHtml(message)}</div>`).join('')
+    : renderEmptyPanel('暂无解析问题。');
+}
+
+function resetJsonAnalysis() {
+  currentRateRows = [];
+  if (el.copyRatesBtn) {
+    el.copyRatesBtn.disabled = true;
+  }
+  if (el.analysisSummary) {
+    el.analysisSummary.className = 'summary-grid empty-state';
+    el.analysisSummary.textContent = '读取 JSON / JSONL 后，这里会展示 Task 重复情况、stop_reason 分布和逐文件占比。';
+  }
+  if (el.rateSummaryTable) {
+    el.rateSummaryTable.innerHTML = renderEmptyPanel('暂无可复制的占比结果。');
+  }
+  if (el.overallTaskDuplicates) {
+    el.overallTaskDuplicates.innerHTML = renderEmptyPanel('暂无数据。');
+  }
+  if (el.overallStepReasons) {
+    el.overallStepReasons.innerHTML = renderEmptyPanel('暂无数据。');
+  }
+  if (el.fileCards) {
+    el.fileCards.innerHTML = renderEmptyPanel('暂无逐文件分析结果。');
+  }
+  if (el.errorList) {
+    el.errorList.innerHTML = renderEmptyPanel('暂无解析问题。');
+  }
+}
+
+function renderJsonAnalysis(files, tasks, reasons, results, errors) {
+  if (!results.length) {
+    resetJsonAnalysis();
+    renderAnalysisErrors(errors);
+    return;
+  }
+
+  renderAnalysisSummary(files, tasks, reasons, results);
+  renderRateSummary(results);
+
+  const duplicateTasks = getDuplicateEntries(tasks);
+  const reasonGroups = getGroupedEntries(reasons);
+
+  el.overallTaskDuplicates.innerHTML = duplicateTasks.length
+    ? renderDataTable(['重复次数', 'Task'], duplicateTasks.map((item) => [item.count, item.value]))
+    : renderEmptyPanel('未发现重复的 Task。');
+
+  el.overallStepReasons.innerHTML = reasonGroups.length
+    ? renderDataTable(['出现次数', 'stop_reason'], reasonGroups.map((item) => [item.count, item.value]))
+    : renderEmptyPanel('未发现 stop_reason / StepReason 字段。');
+
+  renderAnalysisFiles(results);
+  renderAnalysisErrors(errors);
+}
+
 async function parseJsonlFile() {
   const files = Array.from(el.jsonlFileInput.files || []);
   if (!files.length) {
-    setStatus(el.jsonlStatus, '请先选择一个或多个 JSONL 文件。', 'warn');
+    setStatus(el.jsonlStatus, '请先选择一个或多个 JSON / JSONL 文件。', 'warn');
     return;
   }
 
   el.parseJsonlBtn.disabled = true;
-  setStatus(el.jsonlStatus, `正在读取 ${files.length} 个 JSONL 文件 ...`, 'info');
+  resetJsonAnalysis();
+  setStatus(el.jsonlStatus, `正在读取并分析 ${files.length} 个 JSON / JSONL 文件 ...`, 'info');
 
   try {
-    const tasks = [];
-    const skipped = [];
+    const taskEntries = [];
+    const overallTasks = [];
+    const overallReasons = [];
+    const errors = [];
+    const results = [];
 
     for (const file of files) {
-      const content = await file.text();
-      content.split(/\r?\n/).forEach((line, index) => {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          return;
-        }
-        try {
-          const item = JSON.parse(trimmed);
-          const task = typeof item.task === 'string' ? item.task.trim() : '';
-          if (task) {
-            tasks.push({
-              sourceFile: file.name,
-              lineNumber: index + 1,
-              lineLabel: `${file.name} 第 ${index + 1} 行`,
-              value: task,
-              normalized: normalize(task),
-            });
-          } else {
-            skipped.push(`${file.name} 第 ${index + 1} 行缺少 task 字段`);
-          }
-        } catch {
-          skipped.push(`${file.name} 第 ${index + 1} 行不是合法 JSON`);
-        }
-      });
+      try {
+        const content = await file.text();
+        const parsed = parseStructuredFile(content, file.name);
+        const analysis = analyzeJsonItems(parsed.items, file.name);
+        results.push({
+          ...analysis,
+          detectedFormat: parsed.format,
+          fileSize: formatSize(file.size),
+        });
+        taskEntries.push(...analysis.taskEntries);
+        overallTasks.push(...analysis.tasks);
+        overallReasons.push(...analysis.reasons);
+        errors.push(...parsed.warnings.map((warning) => `${file.name}：${warning}`));
+      } catch (error) {
+        errors.push(`${file.name}：${error.message || '未知错误'}`);
+      }
     }
 
-    state.jsonlTasks = tasks;
-    state.skippedJsonlLines = skipped;
+    const sortedResults = sortResultsByFileName(results);
+    state.jsonlTasks = taskEntries;
+    state.skippedJsonlLines = errors;
+    renderJsonAnalysis(files, overallTasks, overallReasons, sortedResults, errors);
+
+    if (!sortedResults.length) {
+      setStatus(el.jsonlStatus, '未能从所选文件中解析出可用记录，请检查文件格式。', 'error');
+      return;
+    }
+
     const fileSummary = files.length === 1 ? `文件 ${files[0].name}` : `${files.length} 个文件`;
     setStatus(
       el.jsonlStatus,
-      `已从${fileSummary}中读取 ${tasks.length} 条 task 数据${skipped.length ? `，另外跳过 ${skipped.length} 行异常记录。` : '。'}`,
-      skipped.length ? 'warn' : 'success',
+      `已从${fileSummary}中提取 ${taskEntries.length} 条 task，并完成字段占比分析${errors.length ? `，另有 ${errors.length} 条解析提示。` : '。'}`,
+      errors.length ? 'warn' : 'success',
     );
   } catch (error) {
-    setStatus(el.jsonlStatus, `JSONL 读取失败：${error.message || '未知错误'}`, 'error');
+    resetJsonAnalysis();
+    setStatus(el.jsonlStatus, `JSON / JSONL 读取失败：${error.message || '未知错误'}`, 'error');
   } finally {
     el.parseJsonlBtn.disabled = false;
   }
 }
+
 
 
 function renderResultLists(results) {
@@ -660,9 +1064,10 @@ async function compareTasks() {
     }
 
     if (!state.jsonlTasks.length) {
-      setStatus(el.jsonlStatus, '请先读取 JSONL 中的 task 字段。', 'warn');
+      setStatus(el.jsonlStatus, '请先读取 JSON / JSONL 中的 task 字段。', 'warn');
       return;
     }
+
 
     if (!Array.isArray(sheet.searchIndex) || !sheet.searchIndex.length) {
       sheet.searchIndex = buildSearchIndex(sheet.rows || []);
@@ -704,6 +1109,17 @@ function bindEvents() {
   el.refreshDatasetsBtn.addEventListener('click', loadDatasets);
   el.parseJsonlBtn.addEventListener('click', parseJsonlFile);
   el.compareBtn.addEventListener('click', compareTasks);
+  el.copyRatesBtn.addEventListener('click', async () => {
+    if (!currentRateRows.length) {
+      return;
+    }
+    const copied = await copyText(buildRateCopyText(currentRateRows));
+    const originalText = el.copyRatesBtn.textContent;
+    el.copyRatesBtn.textContent = copied ? '已复制' : '复制失败';
+    setTimeout(() => {
+      el.copyRatesBtn.textContent = originalText;
+    }, 1500);
+  });
 
   el.datasetSelect.addEventListener('change', (event) => {
     state.selectedDatasetId = event.target.value;
@@ -724,7 +1140,7 @@ function bindEvents() {
   el.jsonlFileInput.addEventListener('change', () => {
     const files = Array.from(el.jsonlFileInput.files || []);
     if (!files.length) {
-      setStatus(el.jsonlStatus, '尚未读取 JSONL。', 'muted');
+      setStatus(el.jsonlStatus, '尚未读取 JSON / JSONL。', 'muted');
       return;
     }
     const previewNames = files.slice(0, 3).map((file) => file.name).join('、');
@@ -740,7 +1156,9 @@ function bindEvents() {
 async function bootstrap() {
   initializeClient();
   bindEvents();
+  resetJsonAnalysis();
   await loadDatasets();
 }
+
 
 bootstrap();

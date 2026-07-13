@@ -22,7 +22,8 @@
         </div>
         <div class="hero-tips">
           <span class="tag">支持 xlsx / xls / csv</span>
-          <span class="tag">支持多 jsonl</span>
+          <span class="tag">支持多 json / jsonl</span>
+
           <span class="tag">未配置后端时可本地演示</span>
         </div>
       </header>
@@ -120,22 +121,22 @@
           <div class="section-title-row">
             <div>
               <p class="section-index">04</p>
-              <h2>读取 JSONL</h2>
+              <h2>读取 JSON / JSONL</h2>
             </div>
             <div class="section-actions">
-              <button id="parseJsonlBtn" class="btn btn-primary" type="button">读取 task 字段</button>
+              <button id="parseJsonlBtn" class="btn btn-primary" type="button">读取并分析字段</button>
               <button class="btn btn-tertiary section-toggle" type="button" data-section-toggle aria-expanded="true">收起</button>
             </div>
           </div>
           <div class="section-body">
             <p class="section-desc">
-              可一次选择多个 JSONL 文件，统一提取每一行 JSON 中的 <code>task</code> 字段，忽略空行和没有该字段的数据。
+              可一次选择多个 JSON / JSONL 文件，统一提取其中的 <code>task</code> 字段，并统计 <code>stop_reason</code> / <code>StepReason</code> 等字段的占比表现。
             </p>
             <label class="file-drop">
               <input id="jsonlFileInput" type="file" accept=".jsonl,.json" multiple />
-              <span>点击选择一个或多个 JSONL 文件</span>
+              <span>点击选择一个或多个 JSON / JSONL 文件</span>
             </label>
-            <div id="jsonlStatus" class="status-box muted">尚未读取 JSONL。</div>
+            <div id="jsonlStatus" class="status-box muted">尚未读取 JSON / JSONL。</div>
           </div>
         </section>
 
@@ -143,6 +144,72 @@
           <div class="section-title-row">
             <div>
               <p class="section-index">05</p>
+              <h2>JSON / JSONL 字段分析</h2>
+            </div>
+            <div class="section-actions">
+              <button id="copyRatesBtn" class="btn btn-secondary" type="button" disabled>复制占比结果</button>
+              <button class="btn btn-tertiary section-toggle" type="button" data-section-toggle aria-expanded="true">收起</button>
+            </div>
+          </div>
+          <div class="section-body">
+            <div id="analysisSummary" class="summary-grid empty-state">
+              读取 JSON / JSONL 后，这里会展示 Task 重复情况、stop_reason 分布和逐文件占比。
+            </div>
+            <div class="analysis-stack">
+              <section class="analysis-panel">
+                <div class="subsection-head">
+                  <div>
+                    <h3>按文件排序的占比结果</h3>
+                    <p class="section-desc">计算公式为 <code>complete + call user</code> / 该文件总记录数 × 100%。</p>
+                  </div>
+                </div>
+                <div id="rateSummaryTable">
+                  <div class="empty-panel">暂无可复制的占比结果。</div>
+                </div>
+              </section>
+
+              <div class="analysis-columns">
+                <details class="analysis-panel" open>
+                  <summary>整体重复的 Task</summary>
+                  <div id="overallTaskDuplicates" class="details-body empty-panel">暂无数据。</div>
+                </details>
+                <details class="analysis-panel">
+                  <summary>整体 stop_reason 分布</summary>
+                  <div id="overallStepReasons" class="details-body empty-panel">暂无数据。</div>
+                </details>
+              </div>
+
+              <section class="analysis-panel">
+                <div class="subsection-head">
+                  <div>
+                    <h3>逐文件结果</h3>
+                    <p class="section-desc">用于单独查看某个文件的 Task 重复情况和字段分布。</p>
+                  </div>
+                </div>
+                <div id="fileCards" class="analysis-cards">
+                  <div class="empty-panel">暂无逐文件分析结果。</div>
+                </div>
+              </section>
+
+              <section class="analysis-panel">
+                <div class="subsection-head">
+                  <div>
+                    <h3>解析问题</h3>
+                    <p class="section-desc">这里只显示解析失败或被跳过的文件、行，不影响其他文件继续分析。</p>
+                  </div>
+                </div>
+                <div id="errorList" class="analysis-errors">
+                  <div class="empty-panel">暂无解析问题。</div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <section class="card section-block full-width" data-section>
+          <div class="section-title-row">
+            <div>
+              <p class="section-index">06</p>
               <h2>匹配分析结果</h2>
             </div>
             <div class="section-actions">
@@ -150,9 +217,11 @@
               <button class="btn btn-tertiary section-toggle" type="button" data-section-toggle aria-expanded="true">收起</button>
             </div>
           </div>
+
           <div class="section-body">
             <div id="resultSummary" class="summary-grid empty-state">
-              请选择一个表格文件，并读取一个或多个 JSONL 文件后再执行匹配。
+              请选择一个表格文件，并读取一个或多个 JSON / JSONL 文件后再执行匹配。
+
             </div>
             <div class="result-columns">
               <div>
